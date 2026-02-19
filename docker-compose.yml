@@ -80,8 +80,9 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      # LangFuse expose une route de santé publique
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/public/health || exit 1"]
+      # Next.js (LangFuse) se bind sur l'IP du container, pas sur 127.0.0.1.
+      # $(hostname -i) résout l'IP eth0 du container depuis l'intérieur.
+      test: ["CMD-SHELL", "wget -qO- http://$(hostname -i):3000/api/public/health || exit 1"]
       interval: 30s
       timeout: 10s
       start_period: 60s  # Next.js met ~30-60s à démarrer
