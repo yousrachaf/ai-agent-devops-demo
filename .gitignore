@@ -137,3 +137,10 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# ────────────────────────────────────────────────────────────────
+# PROMPT MAÎTRE (contient la logique de construction)
+# ────────────────────────────────────────────────────────────────
+PROMPT_Projet_Vitrine_AI_DevOps.md
+prompt*.md
+PROMPT*.md
