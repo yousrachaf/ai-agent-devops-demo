@@ -1,0 +1,85 @@
+# ════════════════════════════════════════════════════════════════
+# docker-compose.prod.yml — Surcharges de production
+# ════════════════════════════════════════════════════════════════
+#
+# Utilisation (sur le VPS ou en CI/CD) :
+#   docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Ce fichier surcharge docker-compose.yml avec :
+#   - Image publiée (ghcr.io) au lieu d'un build local
+#   - Variables d'environnement production (pas de .env file)
+#   - LangFuse Cloud au lieu du LangFuse local (supprime les services locaux)
+#   - Limites de ressources CPU/mémoire
+#   - Politique de redémarrage always
+#   - Logging structuré JSON
+
+name: ai-agent-devops-demo
+
+services:
+
+  # ── Agent IA (production) ────────────────────────────────────────
+  agent:
+    # En production on utilise l'image publiée sur le registry,
+    # pas un build local. Le tag est injecté par le pipeline CI/CD.
+    image: ghcr.io/${GITHUB_USER:-your-username}/ai-agent-devops-demo:${IMAGE_TAG:-latest}
+    build: !reset null # Désactiver le build en production
+
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: warn
+      # En production, LANGFUSE_HOST pointe vers cloud.langfuse.com
+      # (défini dans les secrets de déploiement, pas ici)
+
+    # En production, pas de .env file — les variables viennent de l'environnement
+    # système (secrets manager AWS/GCP, GitHub Secrets, etc.)
+    env_file: !reset []
+
+    # Limites de ressources — éviter qu'un runaway process consomme tout le serveur
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+        reservations:
+          memory: 128M
+          cpus: "0.1"
+
+    # Toujours redémarrer sauf si arrêté manuellement (deploy intentionnel)
+    restart: always
+
+    # Logging structuré compatible avec les agrégateurs (CloudWatch, Datadog, etc.)
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        tag: "agent"
+
+    # Plus de dépendance vers les services locaux — on utilise LangFuse Cloud
+    depends_on: !reset {}
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  # ── Désactiver les services locaux en production ─────────────────
+  # En production, LangFuse Cloud et une base PostgreSQL managée (RDS/Cloud SQL)
+  # remplacent les services locaux.
+  # Ces sections "écrasent" les services de docker-compose.yml avec scale: 0.
+
+  langfuse:
+    deploy:
+      replicas: 0
+
+  postgres:
+    deploy:
+      replicas: 0
+
+# ── Pas de volumes locaux en production ─────────────────────────
+# La persistance est gérée par les services managés (RDS, etc.)
+volumes:
+  postgres_data: !reset {}
+  clickhouse_data: !reset {}

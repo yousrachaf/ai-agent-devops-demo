@@ -1,0 +1,51 @@
+# ────────────────────────────────────────────────────────────────
+# .dockerignore — réduire la taille du build context envoyé au daemon
+# ────────────────────────────────────────────────────────────────
+# Règle : exclure tout ce qui n'est pas nécessaire à l'exécution.
+# Les fichiers exclus ici ne sont pas disponibles dans le Dockerfile
+# pour les instructions COPY, donc n'exclure que ce qu'on ne COPY pas.
+
+# ── Dépendances ──────────────────────────────────────────────────
+# npm install est relancé dans le Dockerfile — inutile de l'envoyer
+node_modules/
+npm-debug.log*
+
+# ── Secrets & configuration locale ───────────────────────────────
+# JAMAIS de clés API dans l'image Docker
+.env
+.env.local
+.env.*.local
+
+# ── Contrôle de version ───────────────────────────────────────────
+.git/
+.gitignore
+
+# ── Tests ─────────────────────────────────────────────────────────
+# Non nécessaires en production — réduisent le contexte et la surface d'attaque
+tests/
+coverage/
+.nyc_output/
+
+# ── Configs de développement ──────────────────────────────────────
+.eslintrc.js
+jest.config.js
+nodemon.json
+
+# ── Fichiers Docker ───────────────────────────────────────────────
+# Le Dockerfile n'a pas besoin de se copier lui-même
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# ── CI/CD ─────────────────────────────────────────────────────────
+.github/
+
+# ── Infrastructure ────────────────────────────────────────────────
+terraform/
+
+# ── Documentation ─────────────────────────────────────────────────
+# Note : knowledge/*.md est NÉCESSAIRE à l'exécution (base de connaissances)
+# et est copié explicitement dans le Dockerfile — ne pas l'exclure ici.
+README.md
+PROMPT_*.md
+LICENSE
