@@ -1,0 +1,244 @@
+# ════════════════════════════════════════════════════════════════
+# CI — Lint → Test → Build → Scan → Push
+# ════════════════════════════════════════════════════════════════
+#
+# Déclenché sur :
+#   - Tout push sur main
+#   - Toute pull request vers main
+#
+# Jobs dans l'ordre :
+#   1. lint         — ESLint sur tout le code Node.js
+#   2. test         — Jest unitaires + coverage > 80%
+#   3. build        — Image Docker avec tag SHA du commit
+#   4. scan         — Trivy : vulnérabilités CRITICAL/HIGH
+#   5. push         — Push sur ghcr.io (push sur main uniquement)
+#   6. prompt-tests — Tests qualité IA (optionnel, activé via secret)
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  NODE_VERSION: "20"
+
+jobs:
+
+  # ── 1. Lint ───────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+  # ── 2. Test ───────────────────────────────────────────────────────
+  test:
+    name: Test (unit + coverage)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests with coverage
+        run: npm run test:coverage -- --forceExit
+        env:
+          NODE_ENV: test
+          # Désactiver LangFuse et Claude dans les tests unitaires
+          LANGFUSE_ENABLED: "false"
+          MOCK_CLAUDE_IN_TESTS: "true"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7
+
+  # ── 3. Build ──────────────────────────────────────────────────────
+  # Construit l'image Docker et la sauvegarde comme artefact pour le job scan.
+  # Le cache BuildKit (type=gha) accélère les builds suivants (~3-5x).
+  build:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      # Transmettre le tag au job push pour éviter toute ambiguïté
+      image-tag: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          # Exporter vers un tar pour le partager avec le job scan
+          outputs: type=docker,dest=/tmp/image.tar
+          # Cache partagé entre tous les workflows du repo
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/image.tar
+          retention-days: 1  # Inutile de garder plus longtemps
+
+  # ── 4. Scan ───────────────────────────────────────────────────────
+  # Trivy analyse l'image pour les vulnérabilités OS et bibliothèques.
+  # Différenciateur fort : peu d'équipes font ça en CI pour leurs agents IA.
+  scan:
+    name: Security scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      security-events: write  # Pour uploader les résultats SARIF
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load --input /tmp/image.tar
+
+      - name: Run Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: table
+          # Échouer uniquement sur les vulnérabilités CRITIQUES non corrigées
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+      - name: Run Trivy and upload SARIF (pour GitHub Security tab)
+        uses: aquasecurity/trivy-action@0.28.0
+        if: always()
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: sarif
+          output: trivy-results.sarif
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+  # ── 5. Push ───────────────────────────────────────────────────────
+  # Push uniquement sur push vers main (pas sur les PRs).
+  # Utilise le cache GHA — pas besoin de retélécharger les layers.
+  push:
+    name: Push to registry
+    runs-on: ubuntu-latest
+    needs: [build, scan]
+    # Condition : push sur main uniquement (pas les PRs)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # GITHUB_TOKEN est automatiquement disponible — pas besoin de secret manuel
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Tag avec le SHA court du commit (ex: sha-a1b2c3d)
+            type=sha,format=short
+            # Tag avec le SHA long (pour la traçabilité complète)
+            type=sha,format=long
+            # Tag de branche (ex: main)
+            type=ref,event=branch
+            # Tag "latest" uniquement sur la branche par défaut
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push to registry
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Le cache est déjà chaud depuis le job build — push très rapide
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── 6. Prompt tests (optionnel) ───────────────────────────────────
+  # Ces tests appellent vraiment Claude API — ne pas activer dans tous les PRs.
+  # Activer via le secret ENABLE_PROMPT_TESTS=true dans les settings GitHub.
+  prompt-tests:
+    name: Prompt quality tests
+    runs-on: ubuntu-latest
+    needs: test
+    if: vars.ENABLE_PROMPT_TESTS == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run prompt quality tests
+        run: npx jest tests/prompts/quality.test.js --forceExit --verbose
+        env:
+          ENABLE_PROMPT_TESTS: "true"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-sonnet-4-5-20250929' }}
+          LANGFUSE_ENABLED: "false"
+          NODE_ENV: test
